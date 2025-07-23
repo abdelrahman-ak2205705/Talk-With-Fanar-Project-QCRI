@@ -1,30 +1,77 @@
 import re, os, asyncio, subprocess, edge_tts
+from pathlib import Path
+import asyncio
 
-VOICE = {"المقدم": "ar-BH-LailaNeural",      
-         "الضيف":  "ar-KW-FahedNeural"}     
-         
+SCRIPT_PATH = "fanar-c_script.txt"   # تأكد من الاسم الصحيح
 
-def load_chunks(path="intro.txt"):
+# 1️⃣ إعداد الأصوات (يمكنك تغييرها كما تريد)
+VOICE = {
+    "المقدم": "ar-KW-FahedNeural",
+    "الضيف" : "ar-BH-LailaNeural",
+}
+
+# 2️⃣ دالة قراءة المقاطع
+def load_chunks(path=SCRIPT_PATH):
+    pattern = re.compile(r'^(\s*(?:المقدم|مقدّم|مقدم|الضيف|ضيف))\s*:\s*(.+)$')
     chunks = []
-    for line in open(path, "r", encoding="utf-8"):
-        m = re.match(r'^(المقدم|الضيف):\s*(.*)$', line.strip())
-        if not m:           
-            continue
-        speaker, text = m.groups()
-        text = re.sub(r'<pause:\s*(\d+)s>', r'<break time="\1s"/>', text)
-        text = re.sub(r'<[^>]+>', '', text)
-        ssml = f"{text}"
-        chunks.append((speaker, ssml))
+
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            m = pattern.match(line)
+            if not m:
+                continue  # تجاهل أي أسطر لا تطابق النمط
+            speaker_raw, text = m.groups()
+
+            # توحيد مفتاح المتحدّث ليتفق مع dict VOICE
+            speaker = "المقدم" if "قدم" in speaker_raw else "الضيف"
+
+            # استبدال <pause:Ns> بـ SSML break
+            text = re.sub(r'<pause:\s*(\d+)s>', r'<break time="\1s"/>', text)
+            text = re.sub(r'<[^>]+>', '', text)  # إزالة أي وسم عشوائي آخر
+
+            ssml = f"{text}"
+            chunks.append((speaker, ssml))
     return chunks
 
+# 3️⃣ التوليد وحفظ المقاطع
 async def synthesize():
-    for i, (spk, ssml) in enumerate(load_chunks(), 1):
-        voice = VOICE[spk]
+    chunks = load_chunks()
+    for i, (speaker, ssml) in enumerate(chunks, 1):
+        voice = VOICE[speaker]
         communicate = edge_tts.Communicate(ssml, voice)
-        await communicate.save(f"{i:03d}.mp3")
+        # اسم الملف بصيغة 001.mp3، 002.mp3 ...
+        out_name = f"{i:03d}.mp3"
+        await communicate.save(out_name)
+        await asyncio.sleep(0.3)  # مهلة صغيرة لتجنّب معدّل طلب عالٍ
 
-asyncio.run(synthesize())
+# 4️⃣ دمج جميع المقاطع في ملف واحد
+def concat_mp3(output="fanar-c-podcast.mp3"):
+    mp3_files = sorted(Path(".").glob("???.mp3"))
+    with open("filelist.txt", "w", encoding="utf-8") as f:
+        for mp3 in mp3_files:
+            f.write(f"file '{mp3.as_posix()}'\n")
 
-clips = "|".join(sorted(f for f in os.listdir() if f.endswith(".mp3")))
-subprocess.run(["ffmpeg", "-y", "-i", f"concat:{clips}", "-c", "copy", "podcast_intro.mp3"])
-print("🎙  Final file → podcast_intro.mp3")
+    subprocess.run([
+        "ffmpeg", "-y",
+        "-f", "concat",
+        "-safe", "0",
+        "-i", "filelist.txt",
+        "-c:a", "libmp3lame",
+        "-b:a", "128k",
+        "-ar", "44100",
+        output
+    ], check=True)
+
+    os.remove("filelist.txt")
+    print(f"✅ ملف البودكاست النهائي: {output}")
+
+# 5️⃣ تشغيل كل شيء
+async def main():
+    await synthesize()
+    concat_mp3()
+
+if __name__ == "__main__":
+    asyncio.run(main())
